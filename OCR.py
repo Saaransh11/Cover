@@ -87,40 +87,39 @@ import cv2
 import numpy as np
 
 def detect_word_boxes(img):
-    # Invert so text is white, bg is black
+    # Binarize and invert
     _, binary = cv2.threshold(img, 128, 255, cv2.THRESH_BINARY_INV)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
-    # Each 'stat' is [x, y, w, h, area]
     word_boxes = []
     for stat in stats[1:]:  # skip background
         x, y, w, h, area = stat
-        if area > 30:  # filter noise
+        if area > 30:
             word_boxes.append((x, y, w, h))
     return word_boxes
 
-def get_empty_zones(img, word_boxes, min_gap_height=10):
+def find_paragraph_gaps(img, word_boxes, min_gap_height=10):
     height, width = img.shape
-    # Create a mask for where words exist
-    mask = np.zeros((height,), dtype=np.uint8)
+    row_has_text = np.zeros((height,), dtype=bool)
 
+    # Mark rows that are part of any word box
     for x, y, w, h in word_boxes:
-        mask[y:y+h] = 1  # Mark all rows that are part of words
+        row_has_text[y:y+h] = True
 
-    # Find stretches of rows with no words
-    split_lines = []
+    # Find continuous regions of empty rows
+    empty_gaps = []
     start = None
     for y in range(height):
-        if mask[y] == 0:
+        if not row_has_text[y]:
             if start is None:
                 start = y
         else:
             if start is not None:
-                if y - start >= min_gap_height:
-                    split_y = (start + y) // 2
-                    split_lines.append(split_y)
+                gap_height = y - start
+                if gap_height >= min_gap_height:
+                    empty_gaps.append((start, y))
                 start = None
-    return split_lines
+    return empty_gaps
 
 def process_image(path):
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
@@ -130,25 +129,26 @@ def process_image(path):
     height, width = img.shape
     marked_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-    # Step 1: Detect word boxes
+    # Step 1: Detect words
     word_boxes = detect_word_boxes(img)
     for (x, y, w, h) in word_boxes:
-        cv2.rectangle(marked_img, (x, y), (x + w, y + h), (0, 255, 0), 1)  # Green boxes = words
+        cv2.rectangle(marked_img, (x, y), (x + w, y + h), (0, 255, 0), 1)
 
-    # Step 2: Detect empty lines between words
-    cut_lines = get_empty_zones(img, word_boxes)
-    for y in cut_lines:
-        cv2.line(marked_img, (0, y), (width, y), (0, 0, 255), 1)  # Red lines = safe cuts
+    # Step 2: Find paragraph gaps
+    gaps = find_paragraph_gaps(img, word_boxes)
+    for start, end in gaps:
+        mid = (start + end) // 2
+        cv2.line(marked_img, (0, mid), (width, mid), (0, 0, 255), 1)
 
-    return marked_img, cut_lines
+    return marked_img, gaps
 
 # Example usage
 if __name__ == "__main__":
     input_path = "page.png"
-    output_path = "final_cut_love.png"
+    output_path = "clean_cut_output.png"
 
-    result_img, cut_lines = process_image(input_path)
+    result_img, gaps = process_image(input_path)
     cv2.imwrite(output_path, result_img)
 
-    print(f"Final perfect slice saved to: {output_path}")
-    print(f"Real empty lines at: {cut_lines}")
+    print(f"🧼 Clean cut saved to: {output_path}")
+    print(f"📎 Found paragraph breaks at lines: {[ (s,e) for s,e in gaps ]}")
