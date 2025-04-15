@@ -85,68 +85,70 @@ if __name__ == "__main__":
 
 import cv2
 import numpy as np
-from pdf2image import convert_from_path
 
-# Convert PDF to image
-def pdf_to_image(pdf_path):
-    images = convert_from_path(pdf_path)
-    return np.array(images[0])  # First page
+def detect_word_boxes(img):
+    # Invert so text is white, bg is black
+    _, binary = cv2.threshold(img, 128, 255, cv2.THRESH_BINARY_INV)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
-# Preprocess image
-def preprocess_image(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    return binary
+    # Each 'stat' is [x, y, w, h, area]
+    word_boxes = []
+    for stat in stats[1:]:  # skip background
+        x, y, w, h, area = stat
+        if area > 30:  # filter noise
+            word_boxes.append((x, y, w, h))
+    return word_boxes
 
-# Detect horizontal lines with Hough Transform
-def detect_horizontal_lines(binary_image):
-    lines = cv2.HoughLinesP(binary_image, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=10)
-    horizontal_lines = []
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            if abs(y1 - y2) < 5:  # Nearly horizontal
-                horizontal_lines.append((y1 + y2) // 2)
-    return sorted(horizontal_lines)
+def get_empty_zones(img, word_boxes, min_gap_height=10):
+    height, width = img.shape
+    # Create a mask for where words exist
+    mask = np.zeros((height,), dtype=np.uint8)
 
-# Compute projection profile
-def compute_projection_profile(binary_image):
-    return np.sum(binary_image, axis=1)
+    for x, y, w, h in word_boxes:
+        mask[y:y+h] = 1  # Mark all rows that are part of words
 
-# Find paragraph breaks
-def find_paragraph_breaks(profile, horizontal_lines, min_gap=20):
-    breaks = []
-    prev_end = 0
-    for i in range(1, len(horizontal_lines)):
-        gap = horizontal_lines[i] - horizontal_lines[i-1]
-        if gap > min_gap and np.mean(profile[horizontal_lines[i-1]:horizontal_lines[i]]) < 10:
-            breaks.append((prev_end, horizontal_lines[i-1]))
-            prev_end = horizontal_lines[i]
-    breaks.append((prev_end, horizontal_lines[-1]))
-    return breaks
+    # Find stretches of rows with no words
+    split_lines = []
+    start = None
+    for y in range(height):
+        if mask[y] == 0:
+            if start is None:
+                start = y
+        else:
+            if start is not None:
+                if y - start >= min_gap_height:
+                    split_y = (start + y) // 2
+                    split_lines.append(split_y)
+                start = None
+    return split_lines
 
-# Extract paragraphs
-def extract_paragraphs(image, breaks):
-    paragraphs = []
-    for start, end in breaks:
-        if end - start > 10:  # Minimum height
-            paragraphs.append(image[start:end, :])
-    return paragraphs
+def process_image(path):
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError("Image not found!")
 
-# Main function
-def process_page(pdf_path):
-    image = pdf_to_image(pdf_path)
-    binary = preprocess_image(image)
-    horizontal_lines = detect_horizontal_lines(binary)
-    profile = compute_projection_profile(binary)
-    breaks = find_paragraph_breaks(profile, horizontal_lines)
-    paragraphs = extract_paragraphs(image, breaks)
-    for i, para in enumerate(paragraphs):
-        cv2.imwrite(f"paragraph_{i+1}.png", para)
-    return len(paragraphs)
+    height, width = img.shape
+    marked_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-# Run it
-pdf_path = "Answers.pdf"
-num_paragraphs = process_page(pdf_path)
-print(f"Detected {num_paragraphs} paragraphs.")
+    # Step 1: Detect word boxes
+    word_boxes = detect_word_boxes(img)
+    for (x, y, w, h) in word_boxes:
+        cv2.rectangle(marked_img, (x, y), (x + w, y + h), (0, 255, 0), 1)  # Green boxes = words
+
+    # Step 2: Detect empty lines between words
+    cut_lines = get_empty_zones(img, word_boxes)
+    for y in cut_lines:
+        cv2.line(marked_img, (0, y), (width, y), (0, 0, 255), 1)  # Red lines = safe cuts
+
+    return marked_img, cut_lines
+
+# Example usage
+if __name__ == "__main__":
+    input_path = "page.png"
+    output_path = "final_cut_love.png"
+
+    result_img, cut_lines = process_image(input_path)
+    cv2.imwrite(output_path, result_img)
+
+    print(f"Final perfect slice saved to: {output_path}")
+    print(f"Real empty lines at: {cut_lines}")
